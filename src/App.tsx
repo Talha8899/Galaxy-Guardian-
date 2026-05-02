@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, Shield, SquareTerminal, Rocket } from 'lucide-react';
+import { Activity, Shield, SquareTerminal, Rocket, Play, Pause, Zap, Crosshair, Radar, Info } from 'lucide-react';
 import { GameEngine } from './services/GameEngine';
 import { generateCommanderTaunt } from './services/aiCommander';
 import { PlayerState } from './types';
@@ -7,13 +7,10 @@ import { PlayerState } from './types';
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<GameEngine | null>(null);
-  const animationFrameRef = useRef<number>();
   
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [gameOver, setGameOver] = useState(false);
-  const [showLevelSelect, setShowLevelSelect] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadingText, setLoadingText] = useState('');
   
   const [playerState, setPlayerState] = useState<PlayerState>({
       x: 0, y: 0,
@@ -23,41 +20,39 @@ export default function App() {
       score: 0, meteorsHit: 0,
       weaponTimer: 0,
       scoreTimer: 0,
-      rocketCount: 3
+      rocketCount: 3,
+      bossHealthPct: 0,
+      hasBossWarning: false
   });
   const [wave, setWave] = useState(1);
   const [commanderMsg, setCommanderMsg] = useState('');
+  const [controlMode, setControlMode] = useState<'keyboard' | 'touch'>('keyboard');
+  const [damageFlash, setDamageFlash] = useState(false);
 
   useEffect(() => {
-    return () => {
-      if (engineRef.current) engineRef.current.stop();
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => engineRef.current?.handleKeyDown(e);
-    const handleKeyUp = (e: KeyboardEvent) => engineRef.current?.handleKeyUp(e);
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
+    const mobile = window.innerWidth < 1024 || ('ontouchstart' in window);
+    if (mobile) setControlMode('touch');
   }, []);
 
   const startGame = (startingWave: number) => {
     setIsPlaying(true);
+    setIsPaused(false);
     setGameOver(false);
     setCommanderMsg('');
-    setShowLevelSelect(false);
+
+    if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+    }
 
     if (canvasRef.current) {
       engineRef.current = new GameEngine(canvasRef.current);
+      engineRef.current.setControlMode(controlMode);
       
       engineRef.current.onPlayerStateChange = (state, currentWave) => {
+          if (state.health < playerState.health) {
+              setDamageFlash(true);
+              setTimeout(() => setDamageFlash(false), 150);
+          }
           setPlayerState(state);
           setWave(currentWave);
       };
@@ -66,282 +61,264 @@ export default function App() {
           handleGameOver(score, meteorsHit, finalWave);
       };
 
+      engineRef.current.onPauseToggle = (paused) => {
+          setIsPaused(paused);
+      };
+
       engineRef.current.start(startingWave);
+    }
+  };
+
+  const togglePause = () => {
+    if (engineRef.current) {
+        engineRef.current.togglePause();
+        setIsPaused(engineRef.current.getIsPaused());
     }
   };
 
   const handleGameOver = (finalScore: number, meteorsHit: number, finalWave: number) => {
      if (engineRef.current) engineRef.current.stop();
-     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
      setIsPlaying(false);
      setGameOver(true);
-     
-     setCommanderMsg('LORD XYLAR IS TRANSMITTING...');
-     
+     setCommanderMsg('INTERCEPTING TRANSMISSION...');
      generateCommanderTaunt(finalWave, meteorsHit, finalScore).then(msg => setCommanderMsg(msg));
   };
 
   return (
-    <div className="relative w-full h-screen bg-[#05050a] overflow-hidden font-sans text-white select-none damage-flash transition-colors duration-[50ms]">
+    <div className="relative w-full h-screen bg-[#05020a] overflow-hidden font-sans text-white select-none">
       <style>{`
-        .damage-flash.animate-ping {
-           background-color: rgba(255, 0, 0, 0.4);
+        @keyframes gradient-x {
+          0%, 100% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+        }
+        .animate-gradient-x {
+          background-size: 200% 200%;
+          animation: gradient-x 3s ease infinite;
+        }
+        .animate-spin-slow {
+          animation: spin 10s linear infinite;
         }
       `}</style>
       
-      {/* Cyberpunk Vignette & Scanlines (optimized) */}
-      <div 
-          className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,#00ffff_2px,#00ffff_4px)]"
-      />
+      {/* Background FX */}
+      <div className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,#00ffff_2px,#00ffff_4px)] z-0" />
+      <div className="scanline z-0" />
       
-
+      {/* Damage Flash */}
+      <div className={`fixed inset-0 pointer-events-none z-50 transition-colors duration-150 ${damageFlash ? 'bg-red-500/20' : 'bg-transparent'}`} />
 
       {/* The Game Canvas */}
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 w-full h-full z-10 pointer-events-none transition-opacity duration-1000"
-        style={{ opacity: isPlaying ? 1 : 0.2 }}
+        className={`absolute inset-0 w-full h-full z-10 transition-opacity duration-700 ${isPlaying ? 'pointer-events-auto cursor-none' : 'pointer-events-none'}`}
+        style={{ opacity: isPlaying ? 1 : 0.3 }}
       />
 
-      {/* UI Overlay Container */}
-      <div className="relative z-20 w-full h-full flex flex-col pointer-events-none pt-4 px-6 md:pt-8 md:px-10">
+      {/* UI Overlay */}
+      <div className="relative z-20 w-full h-full flex flex-col pointer-events-none p-3 sm:p-6">
         
-        {/* HUD */}
+        {/* Main HUD */}
         {isPlaying && (
-          <div className="flex justify-between items-start">
-             <div className="flex flex-col gap-2">
-                <div className="text-xs font-bold tracking-[0.4em] text-cyan-500 uppercase flex items-center gap-2">
-                   <Rocket className="w-4 h-4" /> GAXXY GARDIEN
+          <div className="flex justify-between items-start animate-in fade-in slide-in-from-top-4 duration-500 w-full">
+             <div className="flex flex-col gap-1 sm:gap-2 max-w-[50%]">
+                <div className="stat-card px-2 py-2 sm:px-6 sm:py-4 flex flex-col neon-border w-auto overflow-hidden">
+                    <div className="text-[8px] sm:text-[10px] uppercase font-bold tracking-[0.2em] text-cyan-400 mb-0.5 sm:mb-1 truncate">SCORE</div>
+                    <div className="text-[5vw] sm:text-[4vw] md:text-4xl font-black tabular-nums tracking-tighter leading-none mb-1 sm:mb-0 w-full truncate">
+                      {playerState.score.toLocaleString()}
+                    </div>
+                    <div className="flex gap-2 sm:gap-4 mt-1 sm:mt-2 border-t border-white/10 pt-1 sm:pt-2 w-full">
+                      <div className="min-w-0">
+                        <span className="text-[6px] sm:text-[10px] text-white/40 block truncate">BATTLE</span>
+                        <span className="text-[3vw] sm:text-base font-bold text-cyan-400 block truncate">{wave}</span>
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-[6px] sm:text-[10px] text-white/40 block truncate">METEORS</span>
+                        <span className="text-[3vw] sm:text-base font-bold text-purple-400 block truncate">{playerState.meteorsHit}</span>
+                      </div>
+                    </div>
                 </div>
-                <div className="text-5xl font-black tabular-nums tracking-widest text-[#fff] [text-shadow:0_0_15px_rgba(0,255,255,0.8)]">
-                  {playerState.score.toString().padStart(6, '0')}
-                </div>
-                <div className="text-sm font-bold tracking-[0.2em] text-fuchsia-400 mt-2">
-                   WAVE {wave}
+                
+                <div className="flex gap-1 ml-1">
+                   {Array.from({ length: playerState.rocketCount }).map((_, i) => (
+                      <div key={i} className="w-4 h-4 sm:w-6 sm:h-6 bg-orange-500/20 border border-orange-500/40 flex items-center justify-center animate-in zoom-in duration-300">
+                        <Rocket className="w-2 h-2 sm:w-3 sm:h-3 text-orange-400" />
+                      </div>
+                   ))}
                 </div>
              </div>
 
-             <div className="flex flex-col items-end gap-4 w-48 md:w-64">
-                {/* Health Bar */}
-                <div className="w-full">
-                    <div className="flex justify-between text-xs font-bold tracking-[0.2em] text-red-400 mb-1">
-                        <span className="flex items-center gap-1"><Activity className="w-3 h-3" /> HULL</span>
-                        <span>{Math.max(0, Math.floor(playerState.health))}%</span>
+             <div className="flex flex-col items-end gap-2 sm:gap-3 max-w-[45%] md:max-w-xs">
+                <div className="stat-card w-full neon-border p-2 sm:p-4 text-left">
+                    <div className="flex justify-between items-center mb-1 sm:mb-1.5 px-0.5 sm:px-1">
+                        <span className="text-[6px] sm:text-[10px] font-black tracking-widest text-white/60 flex items-center gap-1 sm:gap-2 italic uppercase truncate"><Activity className="w-2 h-2 sm:w-3 sm:h-3 text-red-500 shrink-0" /> <span className="hidden sm:inline">Hull Status</span><span className="sm:hidden">HULL</span></span>
+                        <span className="text-[3.5vw] sm:text-sm font-black text-white shrink-0 ml-1">{Math.max(0, Math.floor(playerState.health))}%</span>
                     </div>
-                    <div className="w-full h-3 bg-black border border-red-900 overflow-hidden">
+                    <div className="w-full h-1.5 sm:h-2 bg-black border border-white/10 overflow-hidden">
                        <div 
-                         className="h-full bg-gradient-to-r from-red-800 to-red-400 transition-all duration-200"
+                         className="h-full bg-gradient-to-r from-red-600 via-orange-500 to-green-500 transition-all duration-300"
                          style={{ width: `${Math.max(0, playerState.health)}%` }}
                        />
                     </div>
                 </div>
 
-                {/* Energy Bar */}
-                <div className="w-full">
-                    <div className="flex justify-between text-xs font-bold tracking-[0.2em] text-[#22d3ee] mb-1">
-                        <span className="flex items-center gap-1"><Shield className="w-3 h-3" /> SHIELD ENERGY</span>
-                        <span>{Math.max(0, Math.floor(playerState.energy))}%</span>
-                    </div>
-                    <div className="w-full h-2 bg-black border border-cyan-900 overflow-hidden">
-                       <div 
-                         className="h-full bg-gradient-to-r from-cyan-800 to-cyan-300 transition-all duration-100"
-                         style={{ width: `${Math.max(0, playerState.energy)}%` }}
-                       />
-                    </div>
-                </div>
+                {playerState.isShielded && (
+                  <div className="stat-card w-full border-cyan-500/50 shadow-[0_0_20px_rgba(6,182,212,0.2)] animate-pulse p-2 sm:p-4 text-left">
+                      <div className="flex justify-between items-center mb-1 sm:mb-1.5 px-0.5 sm:px-1 text-cyan-400">
+                          <span className="text-[6px] sm:text-[10px] font-black tracking-widest flex items-center gap-1 sm:gap-2 italic uppercase truncate"><Shield className="w-2 h-2 sm:w-3 sm:h-3 shrink-0" /> <span className="hidden sm:inline">Energy Shield</span><span className="sm:hidden">SHIELD</span></span>
+                          <span className="text-[3.5vw] sm:text-sm font-black shrink-0 ml-1">{Math.max(0, Math.floor(playerState.energy))}%</span>
+                      </div>
+                      <div className="w-full h-1.5 sm:h-2 bg-cyan-950/40 border border-cyan-500/40 overflow-hidden">
+                         <div className="h-full bg-cyan-400"
+                           style={{ width: `${Math.max(0, playerState.energy)}%` }}
+                         />
+                      </div>
+                  </div>
+                )}
 
-                {/* Buffs */}
-                <div className="flex flex-col gap-2 w-full items-end mt-2">
-                    {playerState.weaponTimer > 0 && (
-                        <div className="text-[10px] font-bold px-2 py-1 bg-purple-900/50 text-purple-400 border border-purple-500/50 tracking-widest inline-block animate-pulse">
-                            RAPID BLAST: {Math.max(0, playerState.weaponTimer).toFixed(1)}s
-                        </div>
-                    )}
-                    {playerState.scoreTimer > 0 && (
-                        <div className="text-[10px] font-bold px-2 py-1 bg-yellow-900/50 text-yellow-400 border border-yellow-500/50 tracking-widest inline-block animate-pulse">
-                            2X SCORE: {Math.max(0, playerState.scoreTimer).toFixed(1)}s
-                        </div>
-                    )}
-                    <div className="flex gap-2 items-center mt-2">
-                        {Array.from({ length: playerState.rocketCount }).map((_, i) => (
-                            <Rocket key={i} className="w-5 h-5 text-orange-500 fill-orange-500/30 drop-shadow-[0_0_5px_rgba(249,115,22,0.8)]" />
-                        ))}
-                        {playerState.rocketCount === 0 && (
-                            <span className="text-[10px] text-gray-600 font-bold tracking-widest uppercase">No Rockets</span>
-                        )}
-                    </div>
+                <div className="flex gap-1.5 sm:gap-2 mt-1 sm:mt-4">
+                   <button 
+                    onClick={togglePause}
+                    className="stat-card px-2 py-1.5 sm:px-4 sm:py-2 hover:bg-white/10 pointer-events-auto transition-colors flex items-center gap-1 sm:gap-2 text-[8px] sm:text-xs font-bold uppercase tracking-widest text-white/80"
+                   >
+                    <Pause className="w-2 h-2 sm:w-3 sm:h-3" /> PAUSE
+                   </button>
+                   <button 
+                    onClick={() => {
+                       engineRef.current?.stop();
+                       setIsPlaying(false);
+                       setGameOver(false);
+                    }}
+                    className="stat-card px-2 py-1.5 sm:px-4 sm:py-2 hover:bg-red-500/20 pointer-events-auto transition-colors flex items-center gap-1 sm:gap-2 text-[8px] sm:text-xs font-bold uppercase tracking-widest text-red-500 border-red-500/20"
+                   >
+                    <SquareTerminal className="w-2 h-2 sm:w-3 sm:h-3" /> EXIT
+                   </button>
                 </div>
-
-                <button 
-                  onClick={() => {
-                     engineRef.current?.stop();
-                     setIsPlaying(false);
-                     setGameOver(false);
-                  }}
-                  className="mt-4 px-4 py-2 bg-red-900/40 text-red-400 border border-red-500/50 text-xs font-mono tracking-widest uppercase hover:bg-red-800/60 transition-colors pointer-events-auto"
-                >
-                  ABORT MISSION
-                </button>
              </div>
           </div>
         )}
 
-         {/* In-Game Controls Legend */}
-        {isPlaying && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[10px] md:text-xs font-mono text-cyan-500/60 tracking-widest uppercase pointer-events-none w-full px-4 text-center">
-               <div className="flex gap-2 items-center">
-                  <kbd className="border border-cyan-800/40 bg-cyan-950/20 px-1.5 py-0.5 rounded">WASD/ARROWS</kbd> MOVE
-               </div>
-               <div className="flex gap-2 items-center">
-                  <kbd className="border border-cyan-800/40 bg-cyan-950/20 px-1.5 py-0.5 rounded">SPACE</kbd> FIRE
-               </div>
-               <div className="flex gap-2 items-center text-orange-500/80">
-                  <kbd className="border border-orange-800/40 bg-orange-950/20 px-1.5 py-0.5 rounded">X/1</kbd> ROCKET
-               </div>
-               <div className="flex gap-2 items-center">
-                  <kbd className="border border-cyan-800/40 bg-cyan-950/20 px-1.5 py-0.5 rounded">SHIFT</kbd> SHIELD
-               </div>
-            </div>
-        )}
-
-        {/* Boss Interactions UI */}
-        {isPlaying && playerState.hasBossWarning && (
-            <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center animate-pulse pointer-events-none">
-                <div className="text-3xl md:text-5xl text-red-500 font-bold tracking-widest bg-black/80 px-8 py-4 border border-red-500 rounded uppercase shadow-[0_0_50px_rgba(255,0,0,0.5)]">
-                    WARNING: THE BIG ENEMY COMING
-                </div>
-            </div>
-        )}
-
+        {/* Boss Health */}
         {isPlaying && playerState.bossHealthPct > 0 && (
-            <div className="absolute top-24 left-1/2 -translate-x-1/2 w-3/4 max-w-2xl bg-black/90 p-2 border border-purple-500/50 pointer-events-none">
-                <div className="text-purple-400 font-bold text-xs mb-1 tracking-[0.3em] uppercase text-center animate-pulse">
-                    THE BIG ENEMY
-                </div>
-                <div className="w-full h-3 bg-gray-900 overflow-hidden shadow-[0_0_10px_rgba(168,85,247,0.3)]">
+            <div className="absolute top-24 left-1/2 -translate-x-1/2 w-[80vw] max-w-2xl animate-in slide-in-from-top-8 duration-500">
+                <div className="text-[10px] font-black text-red-500 text-center mb-1 tracking-[0.4em] uppercase">ENEMY COMMANDER DETECTED</div>
+                <div className="w-full h-4 bg-black border-2 border-red-900 overflow-hidden rounded-none shadow-[0_0_30px_rgba(239,68,68,0.2)]">
                      <div 
-                        className="h-full bg-gradient-to-r from-purple-800 to-red-600 transition-all duration-200"
+                        className="h-full bg-gradient-to-r from-red-800 to-red-500 transition-all duration-300 relative"
                         style={{ width: `${Math.max(0, playerState.bossHealthPct * 100)}%` }}
-                     />
+                     >
+                        <div className="absolute inset-x-0 bottom-0 h-1 bg-white/20 animate-pulse" />
+                     </div>
                 </div>
             </div>
         )}
 
-        {/* Main Menu */}
+        {/* Home Screen */}
         {!isPlaying && !gameOver && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-auto text-center px-4">
-             <div className="relative">
-                 <h1 className="text-[5rem] md:text-[7rem] leading-none font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-b from-white via-cyan-100 to-cyan-800 uppercase [text-shadow:0_0_20px_rgba(0,255,255,0.3)]">
-                   Galaxy
-                   <br />
-                   <span className="text-[#00ffff] [text-shadow:0_0_40px_rgba(0,255,255,0.8)]">Guardian</span>
-                 </h1>
-                 <div className="absolute -top-4 -right-4 bg-red-600 text-white text-xs font-bold px-2 py-1 transform rotate-12 uppercase tracking-widest">
-                     KEYBOARD DIRECTED
+          <div className="absolute inset-0 pointer-events-auto overflow-y-auto text-center px-4">
+             <div className="min-h-full flex flex-col items-center justify-center py-12 md:py-20 relative z-10 w-full">
+                 <div className="transition-all duration-700 ease-in-out flex flex-col items-center scale-100 translate-y-0 mb-6 md:mb-10 w-full max-w-4xl">
+                    <div className="flex items-center gap-2 sm:gap-3 mb-2 sm:mb-6 bg-cyan-500/10 border border-cyan-500/20 px-2 md:px-4 py-1.5 md:py-2 rounded-full max-w-[90%]">
+                        <Radar className="w-3 h-3 md:w-4 md:h-4 text-cyan-400 animate-spin-slow shrink-0" />
+                        <span className="text-[2.5vw] md:text-xs font-mono tracking-[0.2em] sm:tracking-[0.4em] text-cyan-400 uppercase truncate">Neural Link Established</span>
+                    </div>
+
+                    <h1 className="text-[12vw] sm:text-[10vw] md:text-[8rem] font-black tracking-tighter text-white uppercase leading-[0.9] mb-4 sm:mb-8 italic w-full text-center">
+                        GALAXY <br className="sm:hidden" />
+                        <span className="gradient-text drop-shadow-[0_0_30px_rgba(6,182,212,0.4)] sm:ml-4 pr-4 md:pr-8">
+                            GUARDIAN
+                        </span>
+                    </h1>
                  </div>
+
+             <div className="flex flex-col sm:flex-row justify-center gap-3 sm:gap-6 w-full max-w-2xl mb-8 sm:mb-12 px-4">
+                  <button 
+                    onClick={() => startGame(1)}
+                    className="stat-card py-4 sm:py-6 px-6 sm:px-10 flex flex-col items-center justify-center gap-1 sm:gap-2 group hover:bg-cyan-500 hover:border-cyan-400 transition-all hover:scale-105 w-full sm:w-1/2"
+                  >
+                    <span className="text-[10px] sm:text-xs font-black opacity-60 uppercase tracking-widest text-cyan-400 group-hover:text-white">Deployment</span>
+                    <span className="text-2xl sm:text-4xl font-black italic uppercase">PATROL</span>
+                  </button>
+                  <button 
+                    onClick={() => startGame(10)}
+                    className="stat-card py-4 sm:py-6 px-6 sm:px-10 flex flex-col items-center justify-center gap-1 sm:gap-2 group hover:bg-red-500 hover:border-red-400 transition-all hover:scale-105 w-full sm:w-1/2"
+                  >
+                    <span className="text-[10px] sm:text-xs font-black opacity-60 uppercase tracking-widest text-red-500 group-hover:text-white">Deployment</span>
+                    <span className="text-2xl sm:text-4xl font-black italic uppercase">BATTLE</span>
+                  </button>
              </div>
 
-             <div className="mb-12 mt-12 text-[10px] md:text-sm font-mono tracking-widest text-cyan-500 uppercase flex flex-wrap justify-center gap-x-8 gap-y-4 opacity-70">
-                 <div className="flex gap-2 items-center">
-                    <span className="border border-cyan-800/50 bg-cyan-950/50 px-2 py-1 rounded">WASD/ARROWS</span> <span>Move</span>
-                 </div>
-                 <div className="flex gap-2 items-center">
-                    <span className="border border-cyan-800/50 bg-cyan-950/50 px-2 py-1 rounded">SPACE</span> <span>Fire</span>
-                 </div>
-                 <div className="flex gap-2 items-center">
-                    <span className="border border-cyan-800/50 bg-cyan-950/50 px-2 py-1 rounded">SHIFT/Z</span> <span>Shield</span>
-                 </div>
-                 <div className="flex gap-2 items-center text-orange-400">
-                    <span className="border border-orange-800/50 bg-orange-950/50 px-2 py-1 rounded">X/F/1</span> <span>Rocket</span>
-                 </div>
+             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4 max-w-3xl w-full animate-in slide-in-from-bottom-12 duration-700 pb-10 sm:pb-0">
+                 {[
+                   { icon: Zap, label: "WEAPONRY", desc: "WASD / SPACE / DRAG" },
+                   { icon: Shield, label: "DEFENSE", desc: "FIND POWERUPS" },
+                   { icon: Rocket, label: "MISSILES", desc: "X / 2-TAP" },
+                   { icon: Info, label: "SYSTEM", desc: "ESC / PAUSE" }
+                 ].map((item, i) => (
+                    <div key={i} className="stat-card p-3 sm:p-4 md:p-6 flex flex-col items-center gap-1 sm:gap-2 group hover:bg-white/10 transition-colors">
+                      <item.icon className="w-5 h-5 md:w-6 md:h-6 text-cyan-400 group-hover:scale-110 transition-transform" />
+                      <span className="text-[8px] sm:text-[10px] font-black tracking-widest text-white/40">{item.label}</span>
+                      <span className="text-[8px] sm:text-[10px] md:text-xs font-bold text-white uppercase text-center">{item.desc}</span>
+                    </div>
+                 ))}
              </div>
-             
-             {!showLevelSelect ? (
-               <div className="flex flex-col items-center gap-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
-                  <p className="text-cyan-500/60 font-mono tracking-widest text-xs uppercase mb-2 italic">Systems Ready for Deployment</p>
-                  <button 
-                    onClick={() => setShowLevelSelect(true)}
-                    className="relative overflow-hidden px-20 py-6 bg-gradient-to-r from-cyan-600 to-blue-700 text-white font-black text-2xl tracking-[0.4em] uppercase hover:scale-105 active:scale-95 hover:shadow-[0_0_50px_rgba(0,255,255,0.6)] transition-all outline-none border-2 border-cyan-400 rounded-sm group"
-                  >
-                    <span className="relative z-10">Launch Fighter</span>
-                    <div className="absolute inset-0 bg-white/10 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-500 skew-x-12" />
-                  </button>
-               </div>
-             ) : (
-               <div className="flex flex-col items-center gap-8 animate-in fade-in zoom-in duration-500 bg-black/60 p-10 border border-cyan-500/20 backdrop-blur-sm rounded-lg">
-                 <h2 className="text-2xl font-mono text-cyan-400 mb-2 tracking-[0.4em] uppercase font-bold">Select Sector</h2>
-                 <div className="flex flex-col md:flex-row gap-6">
-                   <button 
-                     onClick={() => startGame(1)}
-                     className="px-10 py-6 bg-black/80 border-2 border-green-500/40 text-green-400 hover:bg-green-500 hover:text-black hover:shadow-[0_0_30px_rgba(0,255,0,0.4)] transition-all font-mono uppercase tracking-widest text-lg"
-                   >
-                     Patrol <br/><span className="text-xs opacity-70">Sector 1</span>
-                   </button>
-                   <button 
-                     onClick={() => startGame(6)}
-                     className="px-10 py-6 bg-black/80 border-2 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500 hover:text-black hover:shadow-[0_0_30px_rgba(255,255,0,0.4)] transition-all font-mono uppercase tracking-widest text-lg"
-                   >
-                     Frontier <br/><span className="text-xs opacity-70">Sector 6</span>
-                   </button>
-                   <button 
-                     onClick={() => startGame(11)}
-                     className="px-10 py-6 bg-black/80 border-2 border-red-500/40 text-red-400 hover:bg-red-500 hover:text-black hover:shadow-[0_0_30px_rgba(255,0,0,0.4)] transition-all font-mono uppercase tracking-widest text-lg"
-                   >
-                     Deadzone <br/><span className="text-xs opacity-70">Sector 11+</span>
-                   </button>
-                 </div>
-                 <button 
-                   onClick={() => setShowLevelSelect(false)}
-                   className="mt-6 text-xs text-gray-500 hover:text-white uppercase tracking-[0.3em] font-mono transition-colors border-b border-transparent hover:border-white"
-                 >
-                   &lt; Back to Hangar
-                 </button>
-               </div>
-             )}
+             </div>
           </div>
         )}
 
         {/* Game Over Screen */}
         {gameOver && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-auto bg-[#05050a]/95 backdrop-blur-md z-50 px-4">
-             <div className="max-w-2xl w-full p-8 md:p-12 bg-black/80 border border-red-900 shadow-[0_0_50px_rgba(255,0,0,0.2)] flex flex-col items-center text-center relative overflow-hidden">
-                
-                {/* Diagonal caution stripes */}
-                <div className="absolute top-0 left-0 w-full h-2 bg-[repeating-linear-gradient(45deg,red,red_10px,transparent_10px,transparent_20px)] opacity-50" />
-                <div className="absolute bottom-0 left-0 w-full h-2 bg-[repeating-linear-gradient(45deg,red,red_10px,transparent_10px,transparent_20px)] opacity-50" />
-
-                <h2 className="text-2xl font-mono mb-2 tracking-[0.5em] text-red-500 font-bold drop-shadow-[0_0_10px_rgba(255,0,0,0.8)]">
-                  CRITICAL HULL FAILURE
-                </h2>
-                
-                <div className="text-[5rem] md:text-[6rem] leading-none font-black text-white mb-4 tabular-nums">
-                   {playerState.score}
+          <div className="absolute inset-0 pointer-events-auto bg-black/90 backdrop-blur-3xl z-50 px-4 overflow-y-auto">
+             <div className="min-h-full flex flex-col items-center justify-center py-16 md:py-24">
+                 <div className="max-w-2xl w-full flex flex-col items-center animate-in zoom-in duration-500">
+                    <div className="flex flex-col sm:flex-row items-center gap-2 sm:gap-4 mb-4 text-red-500 w-full justify-center px-2">
+                    <Activity className="w-6 h-6 sm:w-8 sm:h-8 animate-pulse shrink-0" />
+                    <span className="text-[clamp(0.8rem,4vw,1.5rem)] font-black tracking-[0.2em] sm:tracking-[0.5em] uppercase italic text-center px-2">Critical Hull Failure</span>
                 </div>
                 
-                <div className="text-gray-400 font-mono text-sm mb-10 tracking-widest">
-                   SURVIVED UNTIL WAVE {wave} | METEORS HIT: {playerState.meteorsHit}
+                <h2 className="text-[clamp(1.2rem,6vw,2.5rem)] font-black tracking-tighter text-white uppercase mb-4 sm:mb-8 opacity-40 text-center px-4">DESTINY SEALED</h2>
+                
+                <div className="text-[clamp(3rem,15vw,8rem)] font-black gradient-text leading-none mb-6 italic tracking-tighter w-full text-center px-4 max-w-full overflow-hidden text-ellipsis">
+                   {playerState.score.toLocaleString()}
                 </div>
-
-                <div className="w-full bg-[#100505] p-6 md:p-8 border-l-4 border-red-600 relative mb-12 text-left">
-                   <div className="text-red-500 font-mono text-xs uppercase tracking-widest mb-3 flex items-center gap-2">
-                       <SquareTerminal className="w-4 h-4" />
-                       Incoming Transmission: Lord Xylar
+                
+                <div className="flex gap-8 mb-12">
+                   <div className="text-center">
+                       <div className="text-[10px] font-black text-white/40 tracking-widest">BATTLE</div>
+                       <div className="text-3xl font-black italic text-cyan-400">{wave}</div>
                    </div>
-                   <p className="text-gray-300 font-serif text-lg md:text-xl italic leading-relaxed">
+                   <div className="text-center">
+                       <div className="text-[10px] font-black text-white/40 tracking-widest">NEUTRALIZATIONS</div>
+                       <div className="text-3xl font-black italic text-purple-400">{playerState.meteorsHit}</div>
+                   </div>
+                </div>
+
+                <div className="w-full stat-card border-none bg-white/[0.03] p-4 sm:p-8 mb-6 sm:mb-12 text-center flex flex-col items-center">
+                   <div className="text-[8px] sm:text-[10px] font-black text-red-500 mb-2 sm:mb-3 flex items-center justify-center gap-2 tracking-widest text-center">
+                       COMMANDER TRANSMISSION
+                   </div>
+                   <p className="text-white/90 font-serif text-sm sm:text-xl italic leading-relaxed text-balance text-center">
                      "{commanderMsg}"
                    </p>
                 </div>
 
-                <button 
-                  onClick={() => {
-                      setGameOver(false);
-                      setShowLevelSelect(true);
-                  }}
-                  className="px-16 py-4 bg-transparent border-2 border-white hover:bg-white hover:text-black text-white font-bold text-lg tracking-[0.2em] uppercase transition-all"
-                >
-                  DEPLOY NEW SHIP
-                </button>
+                <div className="flex flex-col items-center gap-2 sm:gap-4 w-full">
+                    <button 
+                      onClick={() => {
+                          setGameOver(false);
+                      }}
+                      className="btn-primary text-lg sm:text-2xl !py-4 sm:!py-6 w-full sm:w-auto px-12"
+                    >
+                      REDEPLOY VESSEL
+                    </button>
+                    <button 
+                      onClick={() => setGameOver(false)}
+                      className="text-[10px] sm:text-xs font-black text-white/30 hover:text-white transition-colors tracking-[0.2em] sm:tracking-[0.4em] mt-4 sm:mt-6 text-center"
+                    >
+                      RETURN TO COMMAND
+                    </button>
+                </div>
              </div>
+          </div>
           </div>
         )}
 

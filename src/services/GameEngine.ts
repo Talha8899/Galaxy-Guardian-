@@ -20,6 +20,7 @@ export class GameEngine {
     energy: 100, maxEnergy: 100,
     health: 100, maxHealth: 100,
     isShielded: false,
+    shieldTimer: 0,
     score: 0, meteorsHit: 0,
     weaponTimer: 0,
     scoreTimer: 0,
@@ -40,31 +41,149 @@ export class GameEngine {
 
   public onPlayerStateChange?: (state: PlayerState, wave: number) => void;
   public onGameOver?: (score: number, meteorsHit: number, wave: number) => void;
+  public onPauseToggle?: (isPaused: boolean) => void;
   
   private isRunning: boolean = false;
+  private isPaused: boolean = false;
+  private controlMode: 'keyboard' | 'touch' = 'keyboard';
   private nextEntityId = 0;
   private scrollSpeed = 50;
+  private scale = 1;
+  private touchX: number | null = null;
+  private touchY: number | null = null;
+  private lastTouchX: number | null = null;
+  private lastTouchY: number | null = null;
+  private lastTouchTime: number = 0;
+  private manualShoot = false;
+  private manualShield = false;
+  private manualRocket = false;
+  private playerTrails: { x: number, y: number, life: number, size: number }[] = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.resize();
     window.addEventListener('resize', this.resize);
+    
+    // Auto-detect touch capability for initial mode
+    if (('ontouchstart' in window) || (navigator.maxTouchPoints > 0)) {
+        this.controlMode = 'touch';
+    }
+
+    this.canvas.addEventListener('touchstart', (e) => this.handleTouch(e), { passive: false });
+    this.canvas.addEventListener('touchmove', (e) => this.handleTouch(e), { passive: false });
+    this.canvas.addEventListener('touchend', (e) => this.handleTouch(e), { passive: false });
+    
+    window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('keyup', this.handleKeyUp);
+
     this.initStars();
     this.initPlanets();
   }
 
+  public setControlMode(mode: 'keyboard' | 'touch') {
+    this.controlMode = mode;
+  }
+
+  private handleTouch(e: TouchEvent) {
+    if (e.cancelable) e.preventDefault();
+    
+    // Switch to touch mode on any touch event
+    if (this.controlMode !== 'touch') {
+        this.controlMode = 'touch';
+    }
+
+    if (e.type === 'touchend') {
+        this.touchX = null; 
+        this.touchY = null;
+        this.lastTouchX = null;
+        this.lastTouchY = null;
+        this.manualShoot = false;
+        return;
+    }
+
+    if (e.touches.length > 0) {
+      const rect = this.canvas.getBoundingClientRect();
+      const touch = e.touches[0];
+      const currentX = touch.clientX - rect.left;
+      const currentY = touch.clientY - rect.top;
+
+      if (e.type === 'touchstart') {
+          // Double tap detection for missile (rocket)
+          const now = Date.now();
+          const timesinceLast = now - this.lastTouchTime;
+          if (timesinceLast < 250 && timesinceLast > 50) {
+              if (this.player.rocketCount > 0) {
+                this.manualRocket = true;
+              }
+          }
+          this.lastTouchTime = now;
+
+          this.lastTouchX = currentX;
+          this.lastTouchY = currentY;
+          
+          // Start firing on touch
+          this.manualShoot = true;
+      } else if (e.type === 'touchmove') {
+          if (this.lastTouchX !== null && this.lastTouchY !== null) {
+              const dx = currentX - this.lastTouchX;
+              const dy = currentY - this.lastTouchY;
+              
+              const sensitivity = 1.35; 
+              this.player.x += dx * sensitivity;
+              this.player.y += dy * sensitivity;
+          }
+          this.lastTouchX = currentX;
+          this.lastTouchY = currentY;
+      }
+      
+      this.touchX = currentX;
+      this.touchY = currentY;
+    }
+  }
+
+  public setManualShoot(val: boolean) { this.manualShoot = val; }
+  public setManualShield(val: boolean) { this.manualShield = val; }
+  public triggerManualRocket() { this.manualRocket = true; }
+
   public resize = () => {
     const rect = this.canvas.getBoundingClientRect();
+    const oldWidth = this.canvas.width;
+    const oldHeight = this.canvas.height;
+    
     this.canvas.width = rect.width;
     this.canvas.height = rect.height;
-    if (this.player.x === 0) {
+    
+    // Calculate scale by using screen diagonal proportionality, providing consistent perceived size
+    // across different aspect ratios (desktop vs mobile).
+    const baseDiagonal = Math.sqrt(800 * 800 + 1000 * 1000);
+    const currentDiagonal = Math.sqrt(this.canvas.width * this.canvas.width + this.canvas.height * this.canvas.height);
+    this.scale = currentDiagonal / baseDiagonal;
+    this.scale = Math.max(0.35, Math.min(4.0, this.scale));
+
+    if (this.player.x === 0 || isNaN(this.player.x)) {
       this.player.x = this.canvas.width / 2;
-      this.player.y = this.canvas.height - 100;
+      this.player.y = this.canvas.height - 100 * this.scale;
+    } else if (oldWidth > 0 && oldHeight > 0) {
+       this.player.x = (this.player.x / oldWidth) * this.canvas.width;
+       this.player.y = (this.player.y / oldHeight) * this.canvas.height;
     }
   };
 
   public handleKeyDown = (e: KeyboardEvent) => {
+      // Switch to keyboard mode on any relevant key press
+      const gameplayKeys = ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyX', 'KeyF', 'KeyZ', 'ShiftLeft', 'ShiftRight', 'Digit1'];
+      if (gameplayKeys.includes(e.code)) {
+          this.controlMode = 'keyboard';
+          if (this.isRunning) {
+              e.preventDefault();
+          }
+      }
+
+      if (e.code === 'Escape' && this.isRunning) {
+          this.togglePause();
+          return;
+      }
       this.keys.add(e.code);
   };
 
@@ -79,7 +198,7 @@ export class GameEngine {
         x: Math.random() * this.canvas.width,
         y: Math.random() * this.canvas.height,
         speed: Math.random() * 80 + 20,
-        size: Math.random() * 2 + 0.5,
+        size: (Math.random() * 2 + 0.5) * this.scale,
         brightness: Math.random(),
       });
     }
@@ -94,14 +213,14 @@ export class GameEngine {
   }
 
   private spawnPlanet(color: string, yPos?: number) {
-     const radius = Math.random() * 80 + 40;
+     const radius = (Math.random() * 80 + 40) * this.scale;
      const featuresCount = Math.floor(Math.random() * 5) + 3;
      const features = [];
      for (let i = 0; i < featuresCount; i++) {
         features.push({
            x: (Math.random() - 0.5) * radius * 1.5,
            y: (Math.random() - 0.5) * radius * 1.5,
-           r: Math.random() * radius * 0.3 + 5,
+           r: Math.random() * radius * 0.3 + 5 * this.scale,
            color: `rgba(255, 255, 255, ${Math.random() * 0.1 + 0.05})`
         });
      }
@@ -149,10 +268,11 @@ export class GameEngine {
     SoundManager.waveStart();
     
     this.player = {
-      x: this.canvas.width / 2, y: this.canvas.height - 100,
+      x: this.canvas.width / 2, y: this.canvas.height - 100 * this.scale,
       energy: 100, maxEnergy: 100,
       health: 100, maxHealth: 100,
       isShielded: false,
+      shieldTimer: 0,
       score: (startingWave - 1) * 500, meteorsHit: 0,
       weaponTimer: 0,
       scoreTimer: 0,
@@ -168,6 +288,39 @@ export class GameEngine {
 
   public stop() {
     this.isRunning = false;
+    this.isPaused = false;
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('keyup', this.handleKeyUp);
+  }
+
+  public togglePause() {
+    if (!this.isRunning) return;
+    this.isPaused = !this.isPaused;
+    if (this.onPauseToggle) this.onPauseToggle(this.isPaused);
+    if (!this.isPaused) {
+      this.lastTime = performance.now();
+      this.loop(this.lastTime);
+    }
+  }
+
+  public pause() {
+    if (this.isRunning && !this.isPaused) {
+        this.isPaused = true;
+        if (this.onPauseToggle) this.onPauseToggle(this.isPaused);
+    }
+  }
+
+  public resume() {
+    if (this.isRunning && this.isPaused) {
+      this.isPaused = false;
+      if (this.onPauseToggle) this.onPauseToggle(this.isPaused);
+      this.lastTime = performance.now();
+      requestAnimationFrame(this.loop);
+    }
+  }
+
+  public getIsPaused() {
+    return this.isPaused;
   }
 
   private createParticles(x: number, y: number, color: string, count: number, speedMult: number = 1) {
@@ -184,21 +337,21 @@ export class GameEngine {
             x, y,
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed,
-            radius: Math.random() * 3 + 1,
+            radius: (Math.random() * 3 + 1) * this.scale,
             life: 1.0, maxLife: Math.random() * 0.5 + 0.2,
             color, markedForDeletion: false
         });
     }
-  }
+}
 
   private spawnMeteor() {
-    const radius = Math.random() * 30 + 20;
+    const radius = (Math.random() * 30 + 20) * this.scale;
     this.meteors.push({
       id: this.nextEntityId++,
       x: Math.random() * this.canvas.width,
-      y: -50,
-      vx: (Math.random() - 0.5) * 40,
-      vy: Math.random() * 50 + 60 + (this.wave * 5),
+      y: -50 * this.scale,
+      vx: (Math.random() - 0.5) * 40 * this.scale,
+      vy: (Math.random() * 50 + 60 + (this.wave * 5)) * this.scale,
       radius,
       rotation: Math.random() * Math.PI * 2,
       spinSpeed: (Math.random() - 0.5) * 2,
@@ -206,17 +359,22 @@ export class GameEngine {
     });
   }
 
-  private spawnEnemy(forceType?: 'drone' | 'hunter' | 'bruiser') {
+  private spawnEnemy(forceType?: 'drone' | 'hunter' | 'bruiser' | 'sniper' | 'weaver') {
     const rand = Math.random();
-    let type: 'drone' | 'hunter' | 'bruiser' = 'drone';
+    let type: 'drone' | 'hunter' | 'bruiser' | 'sniper' | 'weaver' = 'drone';
     if (forceType) {
         type = forceType;
     } else {
         // As waves increase, harder enemies appear more frequently
-        const bruiserChance = Math.min(0.3, 0.05 + this.wave * 0.02);
-        const hunterChance = Math.min(0.5, 0.15 + this.wave * 0.03);
-        if (rand < bruiserChance) type = 'bruiser';
-        else if (rand < bruiserChance + hunterChance) type = 'hunter';
+        const weaverChance = Math.min(0.2, 0.0 + this.wave * 0.02);
+        const sniperChance = Math.min(0.2, 0.0 + this.wave * 0.02);
+        const bruiserChance = Math.min(0.2, 0.05 + this.wave * 0.02);
+        const hunterChance = Math.min(0.4, 0.15 + this.wave * 0.03);
+        
+        if (rand < weaverChance) type = 'weaver';
+        else if (rand < weaverChance + sniperChance) type = 'sniper';
+        else if (rand < weaverChance + sniperChance + bruiserChance) type = 'bruiser';
+        else if (rand < weaverChance + sniperChance + bruiserChance + hunterChance) type = 'hunter';
     }
 
     let hp = 1, radius = 14, vx = 0, vy = 0, shootTimer = 0;
@@ -224,20 +382,32 @@ export class GameEngine {
     // HP scales with wave
     const hpMult = 1 + Math.floor(this.wave / 3) * 0.5;
 
-    if (type === 'bruiser') {
+    if (type === 'sniper') {
+        hp = Math.floor(4 * hpMult);
+        radius = 20;
+        vx = (Math.random() - 0.5) * 50 * this.scale;
+        vy = (Math.random() * 10 + 15 + (this.wave * 2)) * this.scale; // Very slow moving down
+        shootTimer = Math.max(1.5, Math.random() * 1.5 + 1.5 - (this.wave * 0.05));
+    } else if (type === 'weaver') {
+        hp = Math.floor(2 * hpMult);
+        radius = 16;
+        vx = (Math.random() > 0.5 ? 1 : -1) * (150 + this.wave * 10) * this.scale; // Fast horiz
+        vy = (Math.random() * 20 + 30 + (this.wave * 5)) * this.scale;
+        shootTimer = Math.max(0.4, Math.random() * 1 - (this.wave * 0.05));
+    } else if (type === 'bruiser') {
         hp = Math.floor(8 * hpMult);
         radius = 28;
-        vy = Math.random() * 15 + 20 + (this.wave * 4);
+        vy = (Math.random() * 15 + 20 + (this.wave * 4)) * this.scale;
         shootTimer = Math.max(0.5, Math.random() * 2 + 1 - (this.wave * 0.05));
     } else if (type === 'hunter') {
         hp = Math.floor(3 * hpMult);
         radius = 18;
-        vy = Math.random() * 30 + 40 + (this.wave * 8);
+        vy = (Math.random() * 30 + 40 + (this.wave * 8)) * this.scale;
         shootTimer = Math.max(0.3, Math.random() * 2 - (this.wave * 0.1));
     } else {
         hp = Math.floor(1 * hpMult);
-        vx = (Math.random() - 0.5) * 80;
-        vy = Math.random() * 40 + 50 + (this.wave * 10);
+        vx = (Math.random() - 0.5) * 80 * this.scale;
+        vy = (Math.random() * 40 + 50 + (this.wave * 10)) * this.scale;
         shootTimer = Math.max(0.5, Math.random() * 2 + 1 - (this.wave * 0.05));
     }
 
@@ -245,15 +415,15 @@ export class GameEngine {
       id: this.nextEntityId++,
       type,
       x: Math.random() * this.canvas.width,
-      y: -30,
-      vx, vy, radius, hp, maxHp: hp,
+      y: -30 * this.scale,
+      vx, vy, radius: radius * this.scale, hp, maxHp: hp,
       shootTimer,
       markedForDeletion: false
     });
   }
 
   private loop = (timestamp: number) => {
-    if (!this.isRunning) return;
+    if (!this.isRunning || this.isPaused) return;
     
     let dt = (timestamp - this.lastTime) / 1000;
     if (dt > 0.1) dt = 0.1; // clamp
@@ -271,10 +441,10 @@ export class GameEngine {
       id: this.nextEntityId++,
       type: 'boss',
       x: this.canvas.width / 2,
-      y: -100,
+      y: -100 * this.scale,
       vx: 0,
-      vy: 50,
-      radius: 40,
+      vy: 50 * this.scale,
+      radius: 40 * this.scale,
       hp: hp,
       maxHp: hp,
       shootTimer: 2.0,
@@ -287,49 +457,59 @@ export class GameEngine {
   }
 
   private update(dt: number) {
-    this.player.isShielded = false;
+    this.wasShielded = this.player.isShielded;
 
-    // Keyboard movement
-    const speed = 600;
-    if (this.keys.has('ArrowUp') || this.keys.has('KeyW')) this.player.y -= speed * dt;
-    if (this.keys.has('ArrowDown') || this.keys.has('KeyS')) this.player.y += speed * dt;
-    if (this.keys.has('ArrowLeft') || this.keys.has('KeyA')) this.player.x -= speed * dt;
-    if (this.keys.has('ArrowRight') || this.keys.has('KeyD')) this.player.x += speed * dt;
+    // Movement speeds scaled - slightly increased base speed for keyboard
+    const keyboardSpeed = 700 * this.scale;
+    
+    // Keyboard movement logic
+    if (this.controlMode === 'keyboard') {
+      if (this.keys.has('ArrowUp') || this.keys.has('KeyW')) this.player.y -= keyboardSpeed * dt;
+      if (this.keys.has('ArrowDown') || this.keys.has('KeyS')) this.player.y += keyboardSpeed * dt;
+      if (this.keys.has('ArrowLeft') || this.keys.has('KeyA')) this.player.x -= keyboardSpeed * dt;
+      if (this.keys.has('ArrowRight') || this.keys.has('KeyD')) this.player.x += keyboardSpeed * dt;
+    }
 
-    let isShooting = this.keys.has('Space');
-    let isShielding = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.keys.has('KeyZ');
-    let isFiringRocket = this.keys.has('KeyX') || this.keys.has('KeyF') || this.keys.has('Digit1');
+    let isShooting = this.keys.has('Space') || this.manualShoot;
+    let isFiringRocket = this.keys.has('KeyX') || this.keys.has('KeyF') || this.keys.has('Digit1') || this.manualRocket;
+    let isShielding = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.keys.has('KeyZ') || this.manualShield;
 
-    this.player.x = Math.max(15, Math.min(this.canvas.width - 15, this.player.x));
-    this.player.y = Math.max(15, Math.min(this.canvas.height - 15, this.player.y));
+    // Shield Logic (Power-Up based)
+    if (this.player.shieldTimer > 0) {
+        this.player.shieldTimer -= dt;
+        this.player.isShielded = true;
+        this.player.energy = (this.player.shieldTimer / 10) * 100; // Repurpose energy bar as shield bar
+        if (this.player.shieldTimer <= 0) {
+            this.player.isShielded = false;
+            this.player.shieldTimer = 0;
+            this.player.energy = 0;
+            SoundManager.shieldOff();
+        }
+    } else {
+        this.player.isShielded = false;
+        this.player.energy = 0;
+    }
+
+    // Reset one-shot triggers
+    this.manualRocket = false;
+
+    const margin = 20 * this.scale;
+    this.player.x = Math.max(margin, Math.min(this.canvas.width - margin, this.player.x));
+    this.player.y = Math.max(margin, Math.min(this.canvas.height - margin * 2, this.player.y));
 
     if (this.playerRocketTimer > 0) this.playerRocketTimer -= dt;
 
-    if (isShielding) {
-        if (this.player.energy > 0) {
-            this.player.isShielded = true;
-            if (!this.wasShielded) {
-                SoundManager.shieldOn();
-            }
-            this.player.energy -= 40 * dt; // Drain energy
-            
-            // Subtle health regeneration while shielded
-            if (this.player.health < this.player.maxHealth) {
-                this.player.health += 1.5 * dt; // Regenerate small amount per second
-                if (this.player.health > this.player.maxHealth) this.player.health = this.player.maxHealth;
-            }
-        }
-    } else if (isShooting) {
+    if (isShooting) {
         this.playerShootTimer -= dt;
-        if (this.playerShootTimer <= 0 && !this.player.isShielded) {
+        if (this.playerShootTimer <= 0) {
             const isBuffed = this.player.weaponTimer > 0;
             if (isBuffed) {
                 SoundManager.shootPower();
                 for (let fan of [-1, 0, 1]) {
                     this.bullets.push({
                         id: this.nextEntityId++,
-                        x: this.player.x + (fan * 10), y: this.player.y - 15,
-                        vx: fan * 150, vy: -600, radius: 4, markedForDeletion: false,
+                        x: this.player.x + (fan * 10 * this.scale), y: this.player.y - 15 * this.scale,
+                        vx: fan * 150 * this.scale, vy: -600 * this.scale, radius: 4 * this.scale, markedForDeletion: false,
                         isPlayer: true, damage: 2
                     });
                 }
@@ -338,14 +518,14 @@ export class GameEngine {
                 SoundManager.shoot();
                 this.bullets.push({
                     id: this.nextEntityId++,
-                    x: this.player.x - 10, y: this.player.y - 15,
-                    vx: 0, vy: -500, radius: 4, markedForDeletion: false,
+                    x: this.player.x - 10 * this.scale, y: this.player.y - 15 * this.scale,
+                    vx: 0, vy: -500 * this.scale, radius: 4 * this.scale, markedForDeletion: false,
                     isPlayer: true, damage: 1
                 });
                 this.bullets.push({
                     id: this.nextEntityId++,
-                    x: this.player.x + 10, y: this.player.y - 15,
-                    vx: 0, vy: -500, radius: 4, markedForDeletion: false,
+                    x: this.player.x + 10 * this.scale, y: this.player.y - 15 * this.scale,
+                    vx: 0, vy: -500 * this.scale, radius: 4 * this.scale, markedForDeletion: false,
                     isPlayer: true, damage: 1
                 });
                 this.playerShootTimer = 0.2; // slightly slower fire rate
@@ -353,16 +533,31 @@ export class GameEngine {
         }
     }
 
-    if (isFiringRocket && this.player.rocketCount > 0 && !this.player.isShielded && this.playerRocketTimer <= 0) {
+    if (isFiringRocket && this.player.rocketCount > 0 && this.playerRocketTimer <= 0) {
         this.player.rocketCount--;
         SoundManager.rocket();
         this.bullets.push({
             id: this.nextEntityId++,
-            x: this.player.x, y: this.player.y - 20,
-            vx: 0, vy: -800, radius: 12, markedForDeletion: false,
+            x: this.player.x, y: this.player.y - 20 * this.scale,
+            vx: 0, vy: -800 * this.scale, radius: 12 * this.scale, markedForDeletion: false,
             isPlayer: true, isRocket: true, damage: 300
         });
         this.playerRocketTimer = 0.5; // Cooldown after rocket now uses its own timer
+    }
+
+    // Engine Trails Logic
+    this.playerTrails.push({
+        x: this.player.x,
+        y: this.player.y + 10 * this.scale,
+        life: 1.0,
+        size: 8 * this.scale
+    });
+    for (let i = this.playerTrails.length - 1; i >= 0; i--) {
+        this.playerTrails[i].life -= dt * 4;
+        this.playerTrails[i].y += 100 * dt; // move down slightly
+        if (this.playerTrails[i].life <= 0) {
+            this.playerTrails.splice(i, 1);
+        }
     }
 
     if (this.player.weaponTimer > 0) this.player.weaponTimer -= dt;
@@ -490,6 +685,20 @@ export class GameEngine {
         } else if (e.type === 'bruiser') {
             // Bruisers move slightly side to side heavily armored
             e.vx = Math.cos(this.lastTime / 1000) * 50;
+        } else if (e.type === 'sniper') {
+            const desiredY = this.canvas.height / 5;
+            if (e.y < desiredY) e.vy = 60 * this.scale;
+            else e.vy = 0;
+            
+            if (e.x < this.player.x) e.vx += 80 * dt;
+            else if (e.x > this.player.x) e.vx -= 80 * dt;
+            e.vx *= 0.95;
+            if (e.x < 0) e.vx = Math.abs(e.vx);
+            if (e.x > this.canvas.width) e.vx = -Math.abs(e.vx);
+        } else if (e.type === 'weaver') {
+            if (e.x <= e.radius) e.vx = Math.abs(e.vx);
+            if (e.x >= this.canvas.width - e.radius) e.vx = -Math.abs(e.vx);
+            e.vy = (30 + (this.wave * 5) + Math.cos(this.lastTime / 300) * 80) * this.scale;
         } else if (e.type === 'boss') {
             // Boss enters and stays in upper half
             if (e.y > 100 && e.vy > 0) {
@@ -548,8 +757,8 @@ export class GameEngine {
                         this.bullets.push({
                             id: this.nextEntityId++,
                             x: e.x, y: e.y + e.radius,
-                            vx: fan * 90, vy: 220 + (this.wave * 5),
-                            radius: 6, markedForDeletion: false,
+                            vx: fan * 90 * this.scale, vy: (220 + (this.wave * 5)) * this.scale,
+                            radius: 6 * this.scale, markedForDeletion: false,
                             isPlayer: false, damage: 15
                         });
                     }
@@ -560,8 +769,8 @@ export class GameEngine {
                     this.bullets.push({
                         id: this.nextEntityId++,
                         x: e.x, y: e.y + e.radius,
-                        vx: Math.cos(angle) * 450, vy: Math.sin(angle) * 450,
-                        radius: 8, markedForDeletion: false,
+                        vx: Math.cos(angle) * 450 * this.scale, vy: Math.sin(angle) * 450 * this.scale,
+                        radius: 8 * this.scale, markedForDeletion: false,
                         isPlayer: false, damage: 18
                     });
 
@@ -570,8 +779,8 @@ export class GameEngine {
                              this.bullets.push({
                                 id: this.nextEntityId++,
                                 x: e.x, y: e.y + e.radius,
-                                vx: fan * 180, vy: 280,
-                                radius: 5, markedForDeletion: false,
+                                vx: fan * 180 * this.scale, vy: 280 * this.scale,
+                                radius: 5 * this.scale, markedForDeletion: false,
                                 isPlayer: false, damage: 12
                             });
                         }
@@ -584,8 +793,8 @@ export class GameEngine {
                         this.bullets.push({
                             id: this.nextEntityId++,
                             x: e.x, y: e.y,
-                            vx: Math.cos(angle) * 350, vy: Math.sin(angle) * 350,
-                            radius: 5, markedForDeletion: false,
+                            vx: Math.cos(angle) * 350 * this.scale, vy: Math.sin(angle) * 350 * this.scale,
+                            radius: 5 * this.scale, markedForDeletion: false,
                             isPlayer: false, damage: 10
                         });
                     }
@@ -606,18 +815,40 @@ export class GameEngine {
                     this.bullets.push({
                         id: this.nextEntityId++,
                         x: e.x, y: e.y + e.radius,
-                        vx: fan * 100, vy: 250 + (this.wave * 10),
-                        radius: 5, markedForDeletion: false,
+                        vx: fan * 100 * this.scale, vy: (250 + (this.wave * 10)) * this.scale,
+                        radius: 5 * this.scale, markedForDeletion: false,
                         isPlayer: false, damage: 15
                     });
                 }
                 e.shootTimer = 3.5;
+            } else if (e.type === 'sniper') {
+                 // Aim at player
+                 const angle = Math.atan2(this.player.y - e.y, this.player.x - e.x);
+                 // High velocity
+                 const speed = (450 + (this.wave * 15)) * this.scale;
+                 this.bullets.push({
+                     id: this.nextEntityId++,
+                     x: e.x, y: e.y + e.radius,
+                     vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                     radius: 3 * this.scale, markedForDeletion: false,
+                     isPlayer: false, damage: 20
+                 });
+                 e.shootTimer = 2.5;
+            } else if (e.type === 'weaver') {
+                this.bullets.push({
+                    id: this.nextEntityId++,
+                    x: e.x, y: e.y + e.radius,
+                    vx: (Math.random() - 0.5) * 150 * this.scale, vy: (300 + (this.wave * 10)) * this.scale,
+                    radius: 4 * this.scale, markedForDeletion: false,
+                    isPlayer: false, damage: 10
+                });
+                e.shootTimer = 0.8;
             } else {
                 this.bullets.push({
                     id: this.nextEntityId++,
                     x: e.x, y: e.y + e.radius,
-                    vx: 0, vy: 300 + (this.wave * 15),
-                    radius: 4, markedForDeletion: false,
+                    vx: 0, vy: (300 + (this.wave * 15)) * this.scale,
+                    radius: 4 * this.scale, markedForDeletion: false,
                     isPlayer: false, damage: 10
                 });
                 e.shootTimer = e.type === 'hunter' ? 1.5 : 3.0;
@@ -661,7 +892,7 @@ export class GameEngine {
         return Math.sqrt(dx*dx + dy*dy) < (e1.radius + e2.radius);
     };
 
-    const playerHitbox = { x: this.player.x, y: this.player.y, radius: this.player.isShielded ? 40 : 15 };
+    const playerHitbox = { x: this.player.x, y: this.player.y, radius: (this.player.isShielded ? 40 : 15) * this.scale };
 
     // Player vs PowerUps
     for (const p of this.powerUps) {
@@ -676,10 +907,9 @@ export class GameEngine {
     for (const m of this.meteors) {
         if (!m.markedForDeletion && checkCollision(playerHitbox, m)) {
             if (this.player.isShielded) {
-                // Bounce meteor slightly, destroy shield faster
+                // Bounce meteor slightly
                 m.vy = -m.vy * 0.5;
                 m.vx += (m.x - this.player.x) * 2;
-                this.player.energy -= 20;
                 this.createParticles(m.x, m.y + m.radius, '#22d3ee', 10);
             } else {
                 // Player hit
@@ -699,7 +929,6 @@ export class GameEngine {
              if (this.player.isShielded) {
                 e.markedForDeletion = true;
                 this.createParticles(e.x, e.y, '#22d3ee', 15);
-                this.player.energy -= 10;
              } else {
                 e.markedForDeletion = true;
                 SoundManager.hit();
@@ -760,11 +989,11 @@ export class GameEngine {
                             this.powerUps.push({
                                 id: this.nextEntityId++,
                                 type,
-                                x: e.x + (Math.random() - 0.5) * 40,
-                                y: e.y + (Math.random() - 0.5) * 40,
-                                vx: (Math.random() - 0.5) * 120,
-                                vy: Math.random() * 80 + 100, // Always move down
-                                radius: 12, life: 10, markedForDeletion: false
+                                x: e.x + (Math.random() - 0.5) * 40 * this.scale,
+                                y: e.y + (Math.random() - 0.5) * 40 * this.scale,
+                                vx: (Math.random() - 0.5) * 120 * this.scale,
+                                vy: (Math.random() * 80 + 100) * this.scale, // Always move down
+                                radius: 12 * this.scale, life: 10, markedForDeletion: false
                             });
                         }
                     }
@@ -791,7 +1020,6 @@ export class GameEngine {
                 b.markedForDeletion = true;
                 if (this.player.isShielded) {
                     this.createParticles(b.x, b.y, '#22d3ee', 5);
-                    this.player.energy -= 5; // Shield takes a hit
                 } else {
                     SoundManager.hit();
                     this.player.health -= b.damage;
@@ -825,8 +1053,11 @@ export class GameEngine {
       SoundManager.powerup();
       switch (type) {
           case 'shield':
-              this.player.energy = Math.min(this.player.maxEnergy, this.player.energy + 50);
+              this.player.shieldTimer = 10.0; // 10 seconds of shield
+              this.player.isShielded = true;
+              this.player.energy = 100;
               this.createParticles(this.player.x, this.player.y, '#00ffff', 15);
+              SoundManager.shieldOn();
               break;
           case 'health':
               this.player.health = Math.min(this.player.maxHealth, this.player.health + 40);
@@ -849,7 +1080,7 @@ export class GameEngine {
 
   private draw() {
     // Space Background
-    this.ctx.fillStyle = '#05020a';
+    this.ctx.fillStyle = '#000000';
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     
     // Stars
@@ -866,11 +1097,12 @@ export class GameEngine {
 
         // Atmosphere Glow (static, but translated)
         this.ctx.beginPath();
-        const radGrad = this.ctx.createRadialGradient(0, 0, p.radius, 0, 0, p.radius + 40);
+        const glowRadius = p.radius + 40 * this.scale;
+        const radGrad = this.ctx.createRadialGradient(0, 0, p.radius, 0, 0, glowRadius);
         radGrad.addColorStop(0, p.atmosphereColor);
         radGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
         this.ctx.fillStyle = radGrad;
-        this.ctx.arc(0, 0, p.radius + 40, 0, Math.PI * 2);
+        this.ctx.arc(0, 0, glowRadius, 0, Math.PI * 2);
         this.ctx.fill();
 
         // Planet Body
@@ -910,14 +1142,14 @@ export class GameEngine {
            this.ctx.beginPath();
            this.ctx.ellipse(0, 0, p.radius * 2.2, p.radius * 0.5, 0, 0, Math.PI * 2);
            this.ctx.strokeStyle = p.ringColor;
-           this.ctx.lineWidth = 6;
+           this.ctx.lineWidth = 6 * this.scale;
            this.ctx.stroke();
            
            // Double ring for variety
            this.ctx.beginPath();
            this.ctx.ellipse(0, 0, p.radius * 2.4, p.radius * 0.55, 0, 0, Math.PI * 2);
            this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-           this.ctx.lineWidth = 2;
+           this.ctx.lineWidth = 2 * this.scale;
            this.ctx.stroke();
         }
         
@@ -926,63 +1158,73 @@ export class GameEngine {
 
     this.ctx.globalCompositeOperation = 'screen';
 
+    // Player Engine Trails
+    for (const t of this.playerTrails) {
+       this.ctx.globalAlpha = t.life * 0.4;
+       const trailColor = this.player.isShielded ? 'rgba(0, 255, 255, 0.4)' : 'rgba(255, 100, 0, 0.4)';
+       this.ctx.fillStyle = trailColor;
+       this.ctx.beginPath();
+       this.ctx.arc(t.x, t.y, t.size * t.life, 0, Math.PI * 2);
+       this.ctx.fill();
+    }
+    this.ctx.globalAlpha = 1.0;
+
     // Player Ship
     this.ctx.save();
     this.ctx.translate(this.player.x, this.player.y);
     
     // Thrust main
-    this.ctx.fillStyle = '#00ffff';
+    this.ctx.fillStyle = this.player.isShielded ? '#00ffff' : '#ffaa00';
     this.ctx.beginPath();
-    this.ctx.moveTo(-6, 12);
-    this.ctx.lineTo(6, 12);
-    this.ctx.lineTo(0, 25 + Math.random() * 15);
+    this.ctx.moveTo(-6 * this.scale, 12 * this.scale);
+    this.ctx.lineTo(6 * this.scale, 12 * this.scale);
+    this.ctx.lineTo(0, (25 + Math.random() * 15) * this.scale);
     this.ctx.fill();
 
     // Thrust sides
-    this.ctx.fillStyle = '#ff00aa';
+    this.ctx.fillStyle = this.player.isShielded ? '#00ffff' : '#ff00aa';
     this.ctx.beginPath();
-    this.ctx.moveTo(-16, 10);
-    this.ctx.lineTo(-10, 10);
-    this.ctx.lineTo(-13, 20 + Math.random() * 8);
+    this.ctx.moveTo(-16 * this.scale, 10 * this.scale);
+    this.ctx.lineTo(-10 * this.scale, 10 * this.scale);
+    this.ctx.lineTo(-13 * this.scale, (20 + Math.random() * 8) * this.scale);
     this.ctx.fill();
     this.ctx.beginPath();
-    this.ctx.moveTo(10, 10);
-    this.ctx.lineTo(16, 10);
-    this.ctx.lineTo(13, 20 + Math.random() * 8);
+    this.ctx.moveTo(10 * this.scale, 10 * this.scale);
+    this.ctx.lineTo(16 * this.scale, 10 * this.scale);
+    this.ctx.lineTo(13 * this.scale, (20 + Math.random() * 8) * this.scale);
     this.ctx.fill();
 
     // Ship Body Gradient
-    const shipGrad = this.ctx.createLinearGradient(0, -25, 0, 15);
-    shipGrad.addColorStop(0, '#e2e8f0');
-    shipGrad.addColorStop(1, '#64748b');
+    const shipGrad = this.ctx.createLinearGradient(0, -25 * this.scale, 0, 15 * this.scale);
+    shipGrad.addColorStop(0, '#00ffff');
+    shipGrad.addColorStop(0.5, '#3b82f6');
+    shipGrad.addColorStop(1, '#1d4ed8');
 
     this.ctx.fillStyle = shipGrad;
     this.ctx.beginPath();
-    this.ctx.moveTo(0, -25); // Nose
-    this.ctx.lineTo(18, 15); // Right Wing
-    this.ctx.lineTo(8, 10);  // Right engine recess
-    this.ctx.lineTo(-8, 10); // Left engine recess
-    this.ctx.lineTo(-18, 15); // Left Wing
+    this.ctx.moveTo(0, -25 * this.scale); // Nose
+    this.ctx.lineTo(18 * this.scale, 15 * this.scale); // Right Wing
+    this.ctx.lineTo(8 * this.scale, 10 * this.scale);  // Right engine recess
+    this.ctx.lineTo(-8 * this.scale, 10 * this.scale); // Left engine recess
+    this.ctx.lineTo(-18 * this.scale, 15 * this.scale); // Left Wing
     this.ctx.closePath();
     this.ctx.fill();
 
     // Cockpit
-    this.ctx.fillStyle = '#0ea5e9';
+    this.ctx.fillStyle = '#ffffff';
     this.ctx.beginPath();
-    this.ctx.ellipse(0, -5, 4, 8, 0, 0, Math.PI * 2);
+    this.ctx.ellipse(0, -5 * this.scale, 4 * this.scale, 8 * this.scale, 0, 0, Math.PI * 2);
     this.ctx.fill();
 
     // Shield
     if (this.player.isShielded) {
-        this.ctx.strokeStyle = `rgba(34, 211, 238, ${this.player.energy / this.player.maxEnergy})`;
-        this.ctx.lineWidth = 3;
-        // removing shadow blur to improve frame rate
+        this.ctx.strokeStyle = `rgba(34, 211, 238, ${Math.min(1, this.player.shieldTimer)})`;
+        this.ctx.lineWidth = 3 * this.scale;
         this.ctx.beginPath();
-        this.ctx.arc(0, 0, 40, 0, Math.PI * 2);
+        this.ctx.arc(0, 0, 40 * this.scale, 0, Math.PI * 2);
         this.ctx.stroke();
         
-        // inner fill instead of shadow blob
-        this.ctx.fillStyle = `rgba(34, 211, 238, 0.15)`;
+        this.ctx.fillStyle = `rgba(34, 211, 238, ${Math.min(0.15, this.player.shieldTimer * 0.15)})`;
         this.ctx.fill();
     }
     this.ctx.restore();
@@ -999,30 +1241,81 @@ export class GameEngine {
         if (e.type === 'hunter') {
             this.ctx.fillStyle = isHit ? '#ffffff' : '#ff0055';
             this.ctx.beginPath();
-            this.ctx.moveTo(0, 15);
-            this.ctx.lineTo(15, -10);
+            this.ctx.moveTo(0, 15 * this.scale);
+            this.ctx.lineTo(15 * this.scale, -10 * this.scale);
             this.ctx.lineTo(0, 0);
-            this.ctx.lineTo(-15, -10);
+            this.ctx.lineTo(-15 * this.scale, -10 * this.scale);
             this.ctx.fill();
         } else if (e.type === 'bruiser') {
             this.ctx.fillStyle = isHit ? '#ffffff' : '#0a2211';
             this.ctx.strokeStyle = isHit ? '#ffffff' : '#00ff55'; // neon green
-            this.ctx.lineWidth = 2;
+            this.ctx.lineWidth = 2 * this.scale;
             this.ctx.beginPath();
-            this.ctx.moveTo(0, 20);
-            this.ctx.lineTo(25, 0);
-            this.ctx.lineTo(15, -20);
-            this.ctx.lineTo(-15, -20);
-            this.ctx.lineTo(-25, 0);
+            this.ctx.moveTo(0, 20 * this.scale);
+            this.ctx.lineTo(25 * this.scale, 0);
+            this.ctx.lineTo(15 * this.scale, -20 * this.scale);
+            this.ctx.lineTo(-15 * this.scale, -20 * this.scale);
+            this.ctx.lineTo(-25 * this.scale, 0);
             this.ctx.closePath();
             this.ctx.fill();
             this.ctx.stroke();
             
             // Health bar for bruiser
             this.ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
-            this.ctx.fillRect(-20, -28, 40, 4);
+            this.ctx.fillRect(-20 * this.scale, -28 * this.scale, 40 * this.scale, 4 * this.scale);
             this.ctx.fillStyle = '#00ff00';
-            this.ctx.fillRect(-20, -28, 40 * (e.hp / e.maxHp), 4);
+            this.ctx.fillRect(-20 * this.scale, -28 * this.scale, (40 * (e.hp / e.maxHp)) * this.scale, 4 * this.scale);
+        } else if (e.type === 'sniper') {
+            this.ctx.fillStyle = isHit ? '#ffffff' : '#5500ff'; // deep violet
+            this.ctx.strokeStyle = isHit ? '#ffffff' : '#aa00ff';
+            this.ctx.lineWidth = 2 * this.scale;
+            this.ctx.beginPath();
+            this.ctx.moveTo(0, 20 * this.scale);
+            this.ctx.lineTo(10 * this.scale, -15 * this.scale);
+            this.ctx.lineTo(0, -5 * this.scale);
+            this.ctx.lineTo(-10 * this.scale, -15 * this.scale);
+            this.ctx.closePath();
+            this.ctx.fill();
+            this.ctx.stroke();
+
+            // Scope glow
+            this.ctx.fillStyle = '#00ffff';
+            this.ctx.beginPath();
+            this.ctx.arc(0, 10 * this.scale, 3 * this.scale, 0, Math.PI * 2);
+            this.ctx.fill();
+            
+            // Health bar for sniper
+            this.ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+            this.ctx.fillRect(-15 * this.scale, -20 * this.scale, 30 * this.scale, 3 * this.scale);
+            this.ctx.fillStyle = '#00ff00';
+            this.ctx.fillRect(-15 * this.scale, -20 * this.scale, (30 * (e.hp / e.maxHp)) * this.scale, 3 * this.scale);
+
+        } else if (e.type === 'weaver') {
+            this.ctx.fillStyle = isHit ? '#ffffff' : '#00aaff'; // cyan blue
+            this.ctx.strokeStyle = isHit ? '#ffffff' : '#ffffff';
+            this.ctx.lineWidth = 1.5 * this.scale;
+            
+            this.ctx.beginPath();
+            this.ctx.moveTo(0, 15 * this.scale);
+            
+            // Curve swept wings
+            this.ctx.quadraticCurveTo(20 * this.scale, 10 * this.scale, 20 * this.scale, -10 * this.scale);
+            this.ctx.lineTo(5 * this.scale, -5 * this.scale);
+            this.ctx.lineTo(0, -15 * this.scale);
+            this.ctx.lineTo(-5 * this.scale, -5 * this.scale);
+            this.ctx.lineTo(-20 * this.scale, -10 * this.scale);
+            this.ctx.quadraticCurveTo(-20 * this.scale, 10 * this.scale, 0, 15 * this.scale);
+            
+            this.ctx.closePath();
+            this.ctx.fill();
+            this.ctx.stroke();
+            
+            // Health bar for weaver
+            this.ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+            this.ctx.fillRect(-12 * this.scale, -22 * this.scale, 24 * this.scale, 3 * this.scale);
+            this.ctx.fillStyle = '#00ff00';
+            this.ctx.fillRect(-12 * this.scale, -22 * this.scale, (24 * (e.hp / e.maxHp)) * this.scale, 3 * this.scale);
+
         } else if (e.type === 'boss') {
             let bossColor = '#8800ff'; // Phase 1: Purple
             if (e.bossPhase === 2) bossColor = '#ff0055'; // Phase 2: Pink/Red
@@ -1030,11 +1323,11 @@ export class GameEngine {
             
             this.ctx.fillStyle = isHit ? '#ffffff' : bossColor;
             this.ctx.strokeStyle = isHit ? '#ffffff' : '#fff';
-            this.ctx.lineWidth = 3;
+            this.ctx.lineWidth = 3 * this.scale;
 
             // Phase 3 gets an extra pulsing glow
             if (e.bossPhase === 3) {
-                const glowSize = 60 + Math.sin(Date.now() / 100) * 10;
+                const glowSize = (60 + Math.sin(Date.now() / 100) * 10) * this.scale;
                 const phaseGlow = this.ctx.createRadialGradient(0, 0, 0, 0, 0, glowSize);
                 phaseGlow.addColorStop(0, 'rgba(255, 120, 0, 0.4)');
                 phaseGlow.addColorStop(1, 'rgba(255, 0, 0, 0)');
@@ -1047,11 +1340,11 @@ export class GameEngine {
 
             // Draw a big nasty alien ship
             this.ctx.beginPath();
-            this.ctx.moveTo(0, 40);
-            this.ctx.lineTo(50, 0);
-            this.ctx.lineTo(30, -30);
-            this.ctx.lineTo(-30, -30);
-            this.ctx.lineTo(-50, 0);
+            this.ctx.moveTo(0, 40 * this.scale);
+            this.ctx.lineTo(50 * this.scale, 0);
+            this.ctx.lineTo(30 * this.scale, -30 * this.scale);
+            this.ctx.lineTo(-30 * this.scale, -30 * this.scale);
+            this.ctx.lineTo(-50 * this.scale, 0);
             this.ctx.closePath();
             this.ctx.fill();
             this.ctx.stroke();
@@ -1060,22 +1353,22 @@ export class GameEngine {
             this.ctx.fillStyle = isHit ? '#ffffff' : '#00ffff';
             if (e.bossPhase === 3) this.ctx.fillStyle = isHit ? '#ffffff' : '#ffff00';
             this.ctx.beginPath();
-            this.ctx.arc(0, -10, 15, 0, Math.PI * 2);
+            this.ctx.arc(0, -10 * this.scale, 15 * this.scale, 0, Math.PI * 2);
             this.ctx.fill();
 
             // Boss engine flare
-            const flareY = -30;
+            const flareY = -30 * this.scale;
             this.ctx.fillStyle = e.bossPhase === 3 ? '#ff4400' : '#00ffff';
-            const flareSize = 10 + Math.sin(Date.now() / 50) * 5;
-            this.ctx.fillRect(-25, flareY, 10, flareSize);
-            this.ctx.fillRect(15, flareY, 10, flareSize);
+            const flareSize = (10 + Math.sin(Date.now() / 50) * 5) * this.scale;
+            this.ctx.fillRect(-25 * this.scale, flareY, 10 * this.scale, flareSize);
+            this.ctx.fillRect(15 * this.scale, flareY, 10 * this.scale, flareSize);
         } else {
             this.ctx.fillStyle = isHit ? '#ffffff' : '#ff5500'; // neon orange
             this.ctx.beginPath();
             this.ctx.arc(0, 0, e.radius, 0, Math.PI * 2);
             this.ctx.fill();
             this.ctx.fillStyle = isHit ? '#ffffff' : '#fff';
-            this.ctx.fillRect(-5, -5, 10, 10);
+            this.ctx.fillRect(-5 * this.scale, -5 * this.scale, 10 * this.scale, 10 * this.scale);
         }
         this.ctx.restore();
     }
@@ -1088,7 +1381,7 @@ export class GameEngine {
         
         this.ctx.fillStyle = '#8B4513';
         this.ctx.strokeStyle = '#5c2d0c';
-        this.ctx.lineWidth = 2;
+        this.ctx.lineWidth = 2 * this.scale;
         this.ctx.beginPath();
         
         // Rocky shape
@@ -1119,21 +1412,21 @@ export class GameEngine {
         if (p.life > 3 || Math.floor(p.life * 10) % 2 === 0) {
             this.ctx.fillStyle = color;
             this.ctx.beginPath();
-            this.ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            this.ctx.arc(p.x, p.y, p.radius * this.scale, 0, Math.PI * 2);
             this.ctx.fill();
             
             this.ctx.fillStyle = '#000';
-            this.ctx.font = 'bold 14px monospace';
+            this.ctx.font = `bold ${14 * this.scale}px monospace`;
             this.ctx.textAlign = 'center';
             this.ctx.textBaseline = 'middle';
-            this.ctx.fillText(symbol, p.x, p.y + 1);
+            this.ctx.fillText(symbol, p.x, p.y + 1 * this.scale);
         }
         
         // Glow effect
         this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 2;
+        this.ctx.lineWidth = 2 * this.scale;
         this.ctx.beginPath();
-        this.ctx.arc(p.x, p.y, p.radius + 3 + Math.sin(performance.now()/100)*2, 0, Math.PI * 2);
+        this.ctx.arc(p.x, p.y, (p.radius + 3 + Math.sin(performance.now()/100)*2) * this.scale, 0, Math.PI * 2);
         this.ctx.stroke();
     }
 
@@ -1141,38 +1434,38 @@ export class GameEngine {
     for (const b of this.bullets) {
         if (b.isRocket) {
             // Rocket glow effect
-            const rocketGlow = this.ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.radius * 3);
+            const rocketGlow = this.ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.radius * 3 * this.scale);
             rocketGlow.addColorStop(0, 'rgba(255, 100, 0, 0.6)');
             rocketGlow.addColorStop(1, 'rgba(255, 50, 0, 0)');
             this.ctx.fillStyle = rocketGlow;
             this.ctx.beginPath();
-            this.ctx.arc(b.x, b.y, b.radius * 3, 0, Math.PI * 2);
+            this.ctx.arc(b.x, b.y, b.radius * 3 * this.scale, 0, Math.PI * 2);
             this.ctx.fill();
 
             // Rocket body
             this.ctx.fillStyle = '#ff4400';
             this.ctx.beginPath();
-            this.ctx.moveTo(b.x - 12, b.y + 15);
-            this.ctx.lineTo(b.x + 12, b.y + 15);
-            this.ctx.lineTo(b.x, b.y - 25);
+            this.ctx.moveTo(b.x - 12 * this.scale, b.y + 15 * this.scale);
+            this.ctx.lineTo(b.x + 12 * this.scale, b.y + 15 * this.scale);
+            this.ctx.lineTo(b.x, b.y - 25 * this.scale);
             this.ctx.fill();
 
             // Enhanced Rocket fire trail
             this.ctx.fillStyle = '#ffff00';
-            const flameHeight = 15 + Math.random() * 20;
+            const flameHeight = (15 + Math.random() * 20) * this.scale;
             this.ctx.beginPath();
-            this.ctx.moveTo(b.x - 6, b.y + 15);
-            this.ctx.lineTo(b.x + 6, b.y + 15);
-            this.ctx.lineTo(b.x, b.y + 15 + flameHeight);
+            this.ctx.moveTo(b.x - 6 * this.scale, b.y + 15 * this.scale);
+            this.ctx.lineTo(b.x + 6 * this.scale, b.y + 15 * this.scale);
+            this.ctx.lineTo(b.x, b.y + (15 * this.scale) + flameHeight);
             this.ctx.fill();
 
             // Occasional exhaust particles
             if (Math.random() > 0.4) {
-               this.createParticles(b.x, b.y + 15, '#ff8800', 1, 1);
+               this.createParticles(b.x, b.y + 15 * this.scale, '#ff8800', 1, 1);
             }
         } else {
             this.ctx.fillStyle = b.isPlayer ? '#00ffff' : '#ff0055';
-            this.ctx.fillRect(b.x - b.radius, b.y - b.radius * 2, b.radius * 2, b.radius * 4);
+            this.ctx.fillRect(b.x - b.radius * this.scale, b.y - b.radius * 2 * this.scale, b.radius * 2 * this.scale, b.radius * 4 * this.scale);
         }
     }
 
@@ -1182,7 +1475,7 @@ export class GameEngine {
         this.ctx.globalAlpha = p.life / p.maxLife;
         this.ctx.fillStyle = p.color;
         // Using fillRect for particles is significantly faster
-        this.ctx.fillRect(p.x - p.radius, p.y - p.radius, p.radius * 2, p.radius * 2);
+        this.ctx.fillRect(p.x - p.radius * this.scale, p.y - p.radius * this.scale, p.radius * 2 * this.scale, p.radius * 2 * this.scale);
     }
     this.ctx.globalAlpha = 1.0;
     this.ctx.globalCompositeOperation = 'source-over';

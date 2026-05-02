@@ -22,11 +22,12 @@ export interface PowerUp extends Entity {
 export interface PlayerState {
   x: number;
   y: number;
-  energy: number; // For shield
+  energy: number; 
   maxEnergy: number;
   health: number;
   maxHealth: number;
   isShielded: boolean;
+  shieldTimer: number; // Added for power-up based shield
   score: number;
   meteorsHit: number;
   weaponTimer: number;
@@ -47,7 +48,7 @@ export interface Entity {
 }
 
 export interface Enemy extends Entity {
-  type: 'drone' | 'hunter' | 'bruiser' | 'boss';
+  type: 'drone' | 'hunter' | 'bruiser' | 'boss' | 'sniper' | 'weaver';
   hp: number;
   maxHp: number;
   shootTimer: number;

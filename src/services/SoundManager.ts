@@ -82,6 +82,10 @@ export class SoundManager {
         this.playTone('sine', 800, 400, 0.2, 0.1);
     }
 
+    public static shieldOff() {
+        this.playTone('sine', 400, 200, 0.2, 0.1);
+    }
+
     public static waveStart() {
         this.playTone('square', 220, 880, 0.4, 0.15);
         setTimeout(() => this.playTone('square', 440, 1760, 0.6, 0.15), 200);
